@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sistema de Monitoreo IoT - Mascota</title>
+  <style>
+    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f0f2f5; margin: 0; padding: 30px 15px; display: flex; justify-content: center; }
+    .card { background: white; padding: 25px; border-radius: 20px; box-shadow: 0 8px 24px rgba(0,0,0,0.08); width: 100%; max-width: 420px; text-align: center; cursor: pointer; }
+    .title { font-size: 1.4rem; font-weight: bold; color: #1a1a1a; margin-bottom: 5px; }
+    .subtitle { color: #65676b; font-size: 0.9rem; margin-bottom: 18px; }
+    
+    /* Módulo Agua (Plato) */
+    .val { font-size: 2.8rem; font-weight: 800; color: #1c2b46; margin: 10px 0; }
+    .status-box { padding: 14px; border-radius: 14px; font-weight: 700; font-size: 1.05rem; margin: 15px 0; transition: all 0.3s ease; }
+    .limpia { background: #e7f6ec; color: #0d8a3d; border: 1.5px solid #b7ebc6; }
+    .sucia { background: #ffebe9; color: #d9381e; border: 1.5px solid #ffc0b8; animation: pulse 1s infinite alternate; }
+
+    /* Módulo Proximidad (Collar) */
+    .beacon-card { margin-top: 20px; border-top: 1.5px solid #f0f2f5; padding-top: 15px; text-align: left; }
+    .beacon-title { font-weight: 700; color: #374151; font-size: 0.95rem; }
+    .beacon-status { padding: 12px; border-radius: 12px; font-weight: 700; font-size: 0.95rem; margin-top: 8px; text-align: center; transition: all 0.3s ease; }
+    .en-rango { background: #e7f6ec; color: #0d8a3d; border: 1.5px solid #b7ebc6; }
+    .fuera-rango { background: #ffebe9; color: #d9381e; border: 1.5px solid #ffc0b8; animation: pulse 0.8s infinite alternate; }
+    .dot { height: 10px; width: 10px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+
+    @keyframes pulse { from { opacity: 1; } to { opacity: 0.85; } }
+    
+    .audio-notice { margin-top: 15px; font-size: 0.78rem; color: #9ca3af; font-style: italic; }
+  </style>
+</head>
+<body onclick="activarAudio()">
+
+  <div class="card">
+    <div class="title">🐾 Monitoreo de Mascota</div>
+    <div class="subtitle">Panel de Control Telemétrico IoT</div>
+    
+    <!-- Telemetría Plato TDS -->
+    <div id="voltageDisplay" class="val">0.00 V</div>
+    <div id="statusBox" class="status-box limpia">Sincronizando Plato...</div>
+
+    <!-- Telemetría Collar Proximidad -->
+    <div class="beacon-card">
+      <div class="beacon-title">📡 Estado de Proximidad del Collar:</div>
+      <div id="collarStatus" class="beacon-status fuera-rango">
+        <span class="dot" style="background-color: #d9381e;"></span> Evaluando señal...
+      </div>
+    </div>
+
+    <div class="audio-notice">🔊 Haz clic en la pantalla para habilitar el sonido de alarmas.</div>
+  </div>
+
+  <script>
+    const URL_PLATO = "https://mascotaiot-default-rtdb.firebaseio.com/plato/voltaje/plato.json";
+    const URL_COLLAR = "https://mascotaiot-default-rtdb.firebaseio.com/collar.json";
+
+    let audioContext = null;
+    let audioHabilitado = false;
+    let ultimaAlertaAgua = 0;
+    let ultimaAlertaCollar = 0;
+    let ultimoHeartbeatCollar = Date.now();
+
+    function activarAudio() {
+      if (!audioHabilitado) {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        audioHabilitado = true;
+      }
+    }
+
+    // Alarma 1: Tono Agudo (Agua Contaminada)
+    function emitirPitidoAgua() {
+      if (!audioHabilitado || !audioContext) return;
+      const ahora = Date.now();
+      if (ahora - ultimaAlertaAgua < 2500) return;
+      ultimaAlertaAgua = ahora;
+
+      const osc = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.value = 880;
+      gain.gain.setValueAtTime(0.3, audioContext.currentTime);
+      osc.connect(gain);
+      gain.connect(audioContext.destination);
+      osc.start();
+      osc.stop(audioContext.currentTime + 0.3);
+    }
+
+    // Alarma 2: Sirena Grave (Mascota Fuera de Rango)
+    function emitirPitidoCollar() {
+      if (!audioHabilitado || !audioContext) return;
+      const ahora = Date.now();
+      if (ahora - ultimaAlertaCollar < 2000) return;
+      ultimaAlertaCollar = ahora;
+
+      const osc = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      osc.type = 'square';
+      osc.frequency.setValueAtTime(330, audioContext.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(220, audioContext.currentTime + 0.4);
+      gain.gain.setValueAtTime(0.3, audioContext.currentTime);
+      osc.connect(gain);
+      gain.connect(audioContext.destination);
+      osc.start();
+      osc.stop(audioContext.currentTime + 0.4);
+    }
+
+    // 1. Obtener Datos del Plato (Sensor TDS)
+    async function obtenerDatosPlato() {
+      try {
+        const response = await fetch(URL_PLATO);
+        const data = await response.json();
+
+        if (data !== null) {
+          let volt = 0;
+          let estadoTexto = "";
+
+          if (typeof data === 'object') {
+            volt = parseFloat(data.voltaje || data.Voltaje || Object.values(data)[0] || 0);
+            estadoTexto = data.estado || data.Estado || "";
+          } else {
+            volt = parseFloat(data);
+          }
+
+          if (isNaN(volt)) volt = 0.0;
+
+          document.getElementById('voltageDisplay').innerText = volt.toFixed(2) + " V";
+          const statusBox = document.getElementById('statusBox');
+
+          if (volt > 1.20 || estadoTexto === "Sucia") {
+            statusBox.innerText = "🚨 ALERTA: Agua Sucia";
+            statusBox.className = "status-box sucia";
+            emitirPitidoAgua();
+          } else {
+            statusBox.innerText = "✅ ESTADO: Agua Limpia";
+            statusBox.className = "status-box limpia";
+          }
+        }
+      } catch (error) {
+        console.error("Error al consultar plato:", error);
+      }
+    }
+
+    // 2. Obtener Datos del Collar y evaluar el Heartbeat
+    async function obtenerDatosCollar() {
+      const collarDiv = document.getElementById('collarStatus');
+      try {
+        const response = await fetch(URL_COLLAR);
+        const data = await response.json();
+
+        if (data && data.estado === "en_rango") {
+          ultimoHeartbeatCollar = Date.now();
+        }
+
+        // Criterio de tiempo límite (4.5 segundos)
+        const tiempoTranscurrido = Date.now() - ultimoHeartbeatCollar;
+
+        if (tiempoTranscurrido < 4500) {
+          collarDiv.className = "beacon-status en-rango";
+          collarDiv.innerHTML = '<span class="dot" style="background-color: #31a24c;"></span> Conectado (En Rango Seguro)';
+        } else {
+          activarAlertaCollar(collarDiv);
+        }
+      } catch (error) {
+        activarAlertaCollar(collarDiv);
+      }
+    }
+
+    function activarAlertaCollar(div) {
+      div.className = "beacon-status fuera-rango";
+      div.innerHTML = '<span class="dot" style="background-color: #d9381e;"></span> ⚠️ ALERTA: Mascota Fuera de Rango';
+      emitirPitidoCollar();
+    }
+
+    // Intervalo de lectura continuo (1.5 segundos)
+    setInterval(() => {
+      obtenerDatosPlato();
+      obtenerDatosCollar();
+    }, 1500);
+
+    obtenerDatosPlato();
+    obtenerDatosCollar();
+  </script>
+</body>
+</html>
